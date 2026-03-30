@@ -3,6 +3,7 @@ import { SignJWT } from "jose";
 import { buildServer } from "../src/server.js";
 import { config } from "../src/config.js";
 import { pool } from "../src/db/pool.js";
+import { decryptText } from "../src/security/encryption.js";
 import { closeDb, resetDb } from "./test-db.js";
 
 const app = buildServer();
@@ -606,7 +607,7 @@ describe("api integration with postgres", () => {
     expect(strong.statusCode).toBe(201);
   });
 
-  test("webhook subscription created and listed, non-local URL rejected", async () => {
+  test("webhook subscription created and disallowed CIDR target rejected", async () => {
     const adminToken = await login("admin@localtrade.test", "admin");
 
     const created = await app.inject({
@@ -622,10 +623,46 @@ describe("api integration with postgres", () => {
       method: "POST",
       url: "/api/admin/webhooks/subscriptions",
       headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("wh-ext") },
-      payload: { eventType: "order.completed", targetUrl: "http://evil.example.com/hook", secret: "supersecret123" },
+      payload: { eventType: "order.completed", targetUrl: "http://8.8.8.8/hook", secret: "supersecret123" },
     });
     expect(external.statusCode).toBe(400);
     expect(external.json().code).toBe("INVALID_LOCAL_URL");
+  });
+
+  test("webhook dispatch enforces CIDR at runtime and audits blocked delivery", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/admin/webhooks/subscriptions",
+      headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("wh-run-c") },
+      payload: { eventType: "listing.published", targetUrl: "http://127.0.0.1/hook", secret: "runtimecheck123" },
+    });
+    expect(created.statusCode).toBe(201);
+
+    const originalCidrs = [...config.webhookAllowedCidrs];
+    config.webhookAllowedCidrs.splice(0, config.webhookAllowedCidrs.length, "10.0.0.0/8");
+    try {
+      const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-run-l") }, payload: { title: "Webhook runtime", description: "cidr", priceCents: 1000, quantity: 1 } });
+      const listingId = listing.json().id as string;
+      const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-run-s") }, payload: { listingId, fileName: "x.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+      const sid = session.json().sessionId as string;
+      await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-run-ch"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
+      await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-run-f") }, payload: { detectedMime: "image/jpeg" } });
+      await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-run-p") } });
+
+      let blockedCount = 0;
+      for (let i = 0; i < 10; i += 1) {
+        const result = await pool.query("SELECT COUNT(*)::int AS c FROM audit_logs WHERE action = 'webhook.dispatch.blocked_cidr'");
+        blockedCount = Number(result.rows[0].c);
+        if (blockedCount > 0) break;
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      expect(blockedCount).toBeGreaterThan(0);
+    } finally {
+      config.webhookAllowedCidrs.splice(0, config.webhookAllowedCidrs.length, ...originalCidrs);
+    }
   });
 
   test("review image attach enforces max 5 and appeal duplicate rejected", async () => {
@@ -936,8 +973,20 @@ describe("api integration with postgres", () => {
       headers: { authorization: `Bearer ${adminToken}` },
     });
     expect(retrieve.statusCode).toBe(200);
-    const resetToken = retrieve.json().resetToken as string;
-    expect(resetToken).toBeTruthy();
+    expect(retrieve.json().resetToken).toBeUndefined();
+    expect(retrieve.json().hasPendingReset).toBe(true);
+    expect(retrieve.json().expiresAt).toBeTruthy();
+
+    const pendingRow = await pool.query(
+      `SELECT token_enc
+       FROM password_reset_tokens
+       WHERE user_id = $1 AND used_at IS NULL
+       ORDER BY created_at DESC
+       LIMIT 1`,
+      [buyerId],
+    );
+    expect(pendingRow.rowCount).toBe(1);
+    const resetToken = decryptText(pendingRow.rows[0].token_enc as string);
 
     const reset = await app.inject({
       method: "POST",
@@ -1728,6 +1777,36 @@ describe("api integration with postgres", () => {
     });
     expect(flaggedOnUpdate.statusCode).toBe(200);
     expect(flaggedOnUpdate.json().status).toBe("flagged");
+  });
+
+  test("unsafe regex rule patterns are rejected", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+
+    const createUnsafe = await app.inject({
+      method: "POST",
+      url: "/api/admin/content-rules",
+      headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("unsafe-rx-create") },
+      payload: { ruleType: "regex", pattern: "(a+)+$", active: true },
+    });
+    expect(createUnsafe.statusCode).toBe(400);
+    expect(createUnsafe.json().code).toBe("UNSAFE_REGEX_PATTERN");
+
+    const safeRule = await app.inject({
+      method: "POST",
+      url: "/api/admin/content-rules",
+      headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("unsafe-rx-safe") },
+      payload: { ruleType: "regex", pattern: "forbid\\s+me", active: true },
+    });
+    expect(safeRule.statusCode).toBe(201);
+
+    const patchUnsafe = await app.inject({
+      method: "PATCH",
+      url: `/api/admin/content-rules/${safeRule.json().id}`,
+      headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("unsafe-rx-patch") },
+      payload: { pattern: "(a+)+$" },
+    });
+    expect(patchUnsafe.statusCode).toBe(400);
+    expect(patchUnsafe.json().code).toBe("UNSAFE_REGEX_PATTERN");
   });
 
   test("cancel order after payment capture returns invalid state transition", async () => {

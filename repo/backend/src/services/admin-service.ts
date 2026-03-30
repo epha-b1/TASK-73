@@ -1,10 +1,11 @@
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
 import { URL } from "node:url";
+import { config } from "../config.js";
 import { encryptText } from "../security/encryption.js";
 import { decryptText } from "../security/encryption.js";
 import { hmacSha256 } from "../security/hmac.js";
-import { isIPv4 } from "node:net";
+import { assertWebhookTargetAllowed } from "../security/network.js";
 import { processBackupJobs } from "../jobs/worker.js";
 import { adminRepository } from "../repositories/admin-repository.js";
 import { authRepository } from "../repositories/auth-repository.js";
@@ -12,21 +13,16 @@ import { auditRepository } from "../repositories/audit-repository.js";
 import type { AuthUser } from "../types/auth.js";
 import { HttpError } from "../utils/http-error.js";
 
-function isLocalHost(host: string): boolean {
-  if (host === "localhost") return true;
-  if (!isIPv4(host)) return false;
-  const parts = host.split(".").map(Number);
-  if (parts[0] === 127) return true;
-  if (parts[0] === 10) return true;
-  if (parts[0] === 172 && parts[1] >= 16 && parts[1] <= 31) return true;
-  if (parts[0] === 192 && parts[1] === 168) return true;
-  return false;
-}
-
 export async function dispatchWebhookEvent(eventType: string, payload: Record<string, unknown>): Promise<void> {
   const subscriptions = await adminRepository.listActiveWebhooksByEvent(eventType);
   for (const sub of subscriptions) {
     try {
+      try {
+        await assertWebhookTargetAllowed(sub.target_url, config.webhookAllowedCidrs);
+      } catch {
+        await auditRepository.create(null, "webhook.dispatch.blocked_cidr", "webhook_subscription", sub.id, undefined, { eventType, targetUrl: sub.target_url });
+        continue;
+      }
       const secret = decryptText(sub.secret_enc);
       const body = JSON.stringify({ event: eventType, data: payload, ts: Date.now() });
       const sig = hmacSha256(body, secret);
@@ -73,8 +69,7 @@ export const adminService = {
   },
 
   async createWebhook(input: { createdBy: string; eventType: string; targetUrl: string; secret: string }, actor: AuthUser) {
-    const host = new URL(input.targetUrl).hostname;
-    if (!isLocalHost(host)) throw new HttpError(400, "INVALID_LOCAL_URL", "Webhook target must be local network");
+    await assertWebhookTargetAllowed(input.targetUrl, config.webhookAllowedCidrs);
     if (await adminRepository.findWebhook(input.eventType, input.targetUrl)) {
       throw new HttpError(409, "DUPLICATE_SUBSCRIPTION", "Duplicate subscription");
     }
@@ -100,11 +95,10 @@ export const adminService = {
 
   async getPendingResetToken(userId: string, actor: AuthUser) {
     const pending = await authRepository.findLatestPendingPasswordResetTokenByUserId(userId);
-    if (!pending || !pending.token_enc) {
+    if (!pending) {
       throw new HttpError(404, "NO_PENDING_RESET_TOKEN", "No pending reset token for user");
     }
-    const resetToken = decryptText(pending.token_enc);
     await auditRepository.create(actor, "admin.password_reset.token_retrieve", "user", userId);
-    return { userId: pending.user_id, resetToken, expiresAt: pending.expires_at };
+    return { userId: pending.user_id, hasPendingReset: true, expiresAt: pending.expires_at };
   },
 };

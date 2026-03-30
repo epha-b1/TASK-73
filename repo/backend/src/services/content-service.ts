@@ -1,6 +1,7 @@
 import { normalizeRulePattern } from "../domain.js";
 import { auditRepository } from "../repositories/audit-repository.js";
 import { contentRepository } from "../repositories/content-repository.js";
+import { assertSafeRulePattern, safeRuleMatch } from "../security/regex-safety.js";
 import type { AuthUser } from "../types/auth.js";
 import { HttpError } from "../utils/http-error.js";
 
@@ -11,11 +12,7 @@ export const contentService = {
 
   async createRule(input: { ruleType: "keyword" | "regex"; pattern: string; active: boolean }, actor: AuthUser) {
     const pattern = normalizeRulePattern(input.ruleType, input.pattern);
-    try {
-      new RegExp(pattern, "i");
-    } catch {
-      throw new HttpError(400, "INVALID_REGEX", "Invalid regex");
-    }
+    assertSafeRulePattern(pattern);
     const created = await contentRepository.createRule({ ...input, pattern });
     await auditRepository.create(actor, "content_rule.create", "content_rule", created.id);
     return created;
@@ -24,7 +21,8 @@ export const contentService = {
   async testRule(ruleId: string, text: string) {
     const rule = await contentRepository.findRule(ruleId);
     if (!rule) throw new HttpError(404, "RULE_NOT_FOUND", "Rule not found");
-    const matched = new RegExp(rule.pattern, "i").test(text);
+    assertSafeRulePattern(rule.pattern);
+    const matched = safeRuleMatch(rule.pattern, text);
     return { matched, matchDetail: matched ? "pattern matched" : null };
   },
 
@@ -34,11 +32,7 @@ export const contentService = {
       normalizedPattern = normalizeRulePattern(input.ruleType, input.pattern);
     }
     if (normalizedPattern) {
-      try {
-        new RegExp(normalizedPattern, "i");
-      } catch {
-        throw new HttpError(400, "INVALID_REGEX", "Invalid regex");
-      }
+      assertSafeRulePattern(normalizedPattern);
     }
     const updated = await contentRepository.updateRule({ ...input, pattern: normalizedPattern });
     if (!updated) throw new HttpError(404, "RULE_NOT_FOUND", "Rule not found");

@@ -4,6 +4,7 @@ import { listingRepository } from "../repositories/listing-repository.js";
 import { mediaRepository } from "../repositories/media-repository.js";
 import { reviewRepository } from "../repositories/review-repository.js";
 import { orderRepository } from "../repositories/order-repository.js";
+import { assertSafeRulePattern, safeRuleMatch } from "../security/regex-safety.js";
 import { dispatchWebhookEvent } from "./admin-service.js";
 import type { AuthUser } from "../types/auth.js";
 import { HttpError } from "../utils/http-error.js";
@@ -13,7 +14,8 @@ async function detectRule(title: string, description: string) {
   const text = `${title} ${description}`;
   const rules = await contentRepository.listActiveRules();
   for (const rule of rules) {
-    if (new RegExp(rule.pattern, "i").test(text)) {
+    assertSafeRulePattern(rule.pattern);
+    if (safeRuleMatch(rule.pattern, text)) {
       return rule;
     }
   }

@@ -30,16 +30,16 @@ export const authRepository = {
 
   async findLatestPendingPasswordResetTokenByUserId(userId: string) {
     const result = await pool.query(
-      `SELECT user_id, token_enc, expires_at
+      `SELECT user_id, expires_at
        FROM password_reset_tokens
        WHERE user_id = $1
-         AND used_at IS NULL
-         AND expires_at > NOW()
+          AND used_at IS NULL
+          AND expires_at > NOW()
        ORDER BY created_at DESC
        LIMIT 1`,
       [userId],
     );
-    return result.rows[0] as { user_id: string; token_enc: string | null; expires_at: string } | undefined;
+    return result.rows[0] as { user_id: string; expires_at: string } | undefined;
   },
 
   async findValidPasswordResetToken(tokenHash: string) {
