@@ -63,19 +63,35 @@ backend_status=${PIPESTATUS[0]}
 set -e
 read -r backend_passed backend_failed backend_total < <(parse_vitest_counts "$backend_log")
 
-echo "Installing frontend dependencies..."
-npm --prefix frontend ci
+node_major="$(node -p "process.versions.node.split('.')[0]")"
 
-echo "Running frontend tests..."
-frontend_log="$(mktemp)"
-set +e
-npm --prefix frontend test -- --watch=false | tee "$frontend_log"
-frontend_status=${PIPESTATUS[0]}
-set -e
-read -r frontend_passed frontend_failed frontend_total < <(parse_vitest_counts "$frontend_log")
+if [ "$node_major" -ge 20 ]; then
+  echo "Installing frontend dependencies..."
+  npm --prefix frontend ci
 
-echo "Running frontend build check..."
-npm --prefix frontend run build
+  echo "Running frontend tests..."
+  frontend_log="$(mktemp)"
+  set +e
+  npm --prefix frontend test -- --watch=false | tee "$frontend_log"
+  frontend_status=${PIPESTATUS[0]}
+  set -e
+  read -r frontend_passed frontend_failed frontend_total < <(parse_vitest_counts "$frontend_log")
+
+  echo "Running frontend build check..."
+  npm --prefix frontend run build
+else
+  echo "Host Node.js $(node -v) is below frontend requirement. Running frontend checks in Node 20 container..."
+  frontend_log="$(mktemp)"
+  set +e
+  docker run --rm \
+    -v "$PWD/frontend:/workspace/frontend" \
+    -w /workspace/frontend \
+    node:20-alpine \
+    sh -lc 'npm ci && npm test -- --watch=false && npm run build' | tee "$frontend_log"
+  frontend_status=${PIPESTATUS[0]}
+  set -e
+  read -r frontend_passed frontend_failed frontend_total < <(parse_vitest_counts "$frontend_log")
+fi
 
 total_passed=$((backend_passed + frontend_passed))
 total_failed=$((backend_failed + frontend_failed))
