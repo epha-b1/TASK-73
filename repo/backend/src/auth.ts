@@ -1,7 +1,15 @@
 import { hash, verify } from "@node-rs/argon2";
 import { SignJWT, jwtVerify } from "jose";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, webcrypto } from "node:crypto";
 import { config } from "./config.js";
+
+if (typeof globalThis.crypto === "undefined") {
+  Object.defineProperty(globalThis, "crypto", {
+    value: webcrypto,
+    configurable: true,
+    writable: true,
+  });
+}
 
 const secret = new TextEncoder().encode(config.jwtSecret);
 
