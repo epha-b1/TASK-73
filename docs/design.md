@@ -10,8 +10,10 @@ LocalTrade is a modular monolith with clear domain boundaries:
 
 ## 2. Runtime Components
 - `api`: Fastify server, auth, RBAC, validation, domain routes.
-- `worker`: async job executor (metadata extraction/transcode/compression/content scan).
-- `scheduler`: periodic tasks (stale-job recovery, backup trigger, cleanup).
+- Background workers and scheduler run inside the API process for on-prem simplicity:
+  - async job execution (metadata extraction/transcode/compression)
+  - stale-job recovery
+  - nightly backup scheduling and pruning
 - `frontend`: Angular client served by Node/NGINX container.
 - `postgres`: primary data store.
 
@@ -42,8 +44,7 @@ LocalTrade is a modular monolith with clear domain boundaries:
 - `published` -> `removed` (seller unpublish/admin/deactivation)
 
 ### 4.2 Asset State Machine
-- `uploading` -> `uploaded` (all chunks assembled)
-- `uploaded` -> `processing` (job queued)
+- `uploading` -> `processing` (all chunks assembled and post-process job queued)
 - `processing` -> `ready` (metadata/transcode complete)
 - `processing` -> `failed` (max retries exhausted)
 - any -> `blocked` (safety/fingerprint violation)

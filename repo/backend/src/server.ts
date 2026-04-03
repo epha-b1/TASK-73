@@ -7,7 +7,7 @@ import { config } from "./config.js";
 import { runMigrations } from "./db/migrate.js";
 import { pool } from "./db/pool.js";
 import { runSeed } from "./db/seed.js";
-import { processAssetPostprocessJobs, processBackupJobs, recoverStaleJobs, startNightlyBackupScheduler } from "./jobs/worker.js";
+import { processBackupJobs, startAssetPostprocessScheduler, startNightlyBackupScheduler, startStaleRecoveryScheduler } from "./jobs/worker.js";
 import { fileStorage } from "./storage/file-storage.js";
 import { adminRoutes } from "./routes/admin.js";
 import { appealRoutes } from "./routes/appeals.js";
@@ -76,9 +76,11 @@ export function buildServer() {
     },
   });
 
-  app.register(swaggerUi, {
-    routePrefix: "/docs",
-  });
+  if (config.docsEnabled) {
+    app.register(swaggerUi, {
+      routePrefix: "/docs",
+    });
+  }
 
   app.setErrorHandler((error, _req, reply) => {
     if ((error as any).statusCode && (error as any).code) {
@@ -117,8 +119,8 @@ async function start() {
   await runMigrations();
   await runSeed();
   await fileStorage.ensureRoots();
-  await recoverStaleJobs();
-  await processAssetPostprocessJobs();
+  startStaleRecoveryScheduler();
+  startAssetPostprocessScheduler();
   await processBackupJobs();
   startNightlyBackupScheduler();
   const app = buildServer();

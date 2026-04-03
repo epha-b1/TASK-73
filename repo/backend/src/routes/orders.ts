@@ -10,7 +10,7 @@ export async function orderRoutes(app: FastifyInstance) {
     try {
       const query = z
         .object({
-          status: z.enum(["placed", "cancelled", "payment_captured", "completed"]).optional(),
+          status: z.enum(["placed", "cancelled", "payment_captured", "completed", "refunded"]).optional(),
         })
         .parse(req.query);
       const actor = (req as AppRequest).authUser!;

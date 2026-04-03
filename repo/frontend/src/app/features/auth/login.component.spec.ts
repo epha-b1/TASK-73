@@ -1,6 +1,6 @@
 import { TestBed } from '@angular/core/testing';
-import { RouterTestingModule } from '@angular/router/testing';
-import { Router } from '@angular/router';
+import { NoopAnimationsModule } from '@angular/platform-browser/animations';
+import { provideRouter, Router } from '@angular/router';
 import { vi } from 'vitest';
 import { AuthService } from '../../core/auth.service';
 import { ToastService } from '../../core/toast.service';
@@ -20,8 +20,9 @@ describe('LoginComponent', () => {
     toastError.mockReset();
 
     await TestBed.configureTestingModule({
-      imports: [LoginComponent, RouterTestingModule],
+      imports: [LoginComponent, NoopAnimationsModule],
       providers: [
+        provideRouter([]),
         { provide: AuthService, useValue: { login, defaultHomeRoute } },
         { provide: ToastService, useValue: { success: toastSuccess, error: toastError } },
       ],
@@ -32,7 +33,7 @@ describe('LoginComponent', () => {
     const fixture = TestBed.createComponent(LoginComponent);
     fixture.detectChanges();
     const text = (fixture.nativeElement as HTMLElement).textContent ?? '';
-    expect(text).toContain('Sign In');
+    expect(text).toContain('Welcome back');
   });
 
   it('auth service is available', () => {

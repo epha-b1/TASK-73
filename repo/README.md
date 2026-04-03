@@ -5,7 +5,7 @@
 No `.env` setup is required for local development.
 
 ```bash
-docker compose up
+docker compose -p localtrade73 up
 ```
 
 ## Service addresses
@@ -26,6 +26,27 @@ docker compose up
 
 ```bash
 bash run_tests.sh
+```
+
+### Run tests with Docker-backed database (recommended)
+
+The backend API integration suite requires PostgreSQL. To avoid conflicts with other local Docker projects, this workspace uses host port `55432`.
+
+```bash
+POSTGRES_PORT=55432 docker compose -p localtrade73 up -d postgres
+DATABASE_URL=postgres://localtrade:localtrade@localhost:55432/localtrade npm --prefix backend run migrate
+DATABASE_URL=postgres://localtrade:localtrade@localhost:55432/localtrade npm --prefix backend run seed
+npm --prefix backend test
+npm --prefix frontend test -- --watch=false
+npm --prefix frontend run build
+```
+
+Using `-p localtrade73` isolates this stack from other Docker projects, and `POSTGRES_PORT=55432` avoids host-port collisions.
+
+Stop containers when done:
+
+```bash
+docker compose -p localtrade73 down
 ```
 
 ## Encrypted backups and restore
@@ -49,7 +70,7 @@ psql "$DATABASE_URL" < decrypted-backup.sql
 
 ## Verification flow (login to order)
 
-1. Start services with `docker compose up`.
+1. Start services with `docker compose -p localtrade73 up`.
 2. Open `http://localhost:4200`.
 3. Log in as seller (`seller@localtrade.test` / `seller`).
 4. Go to **My Listings**, create a listing, then go to **Upload** and upload at least one asset.

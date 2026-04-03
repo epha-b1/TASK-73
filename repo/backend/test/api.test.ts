@@ -1,4 +1,5 @@
 import { afterAll, beforeEach, describe, expect, test } from "vitest";
+import { createServer } from "node:http";
 import { SignJWT } from "jose";
 import { buildServer } from "../src/server.js";
 import { config } from "../src/config.js";
@@ -665,6 +666,52 @@ describe("api integration with postgres", () => {
     }
   });
 
+  test("webhook dispatch includes documented signature headers", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+
+    const webhookReceipt = new Promise<{ headers: Record<string, string | string[] | undefined>; body: string }>((resolve) => {
+      const server = createServer((req, res) => {
+        const chunks: Buffer[] = [];
+        req.on("data", (chunk) => chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)));
+        req.on("end", () => {
+          const payload = Buffer.concat(chunks).toString("utf8");
+          res.statusCode = 200;
+          res.end("ok");
+          server.close(() => resolve({ headers: req.headers, body: payload }));
+        });
+      });
+      server.listen(0, "127.0.0.1", async () => {
+        const address = server.address();
+        if (!address || typeof address === "string") {
+          server.close();
+          throw new Error("failed to bind webhook test server");
+        }
+        await app.inject({
+          method: "POST",
+          url: "/api/admin/webhooks/subscriptions",
+          headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("wh-hdr-c") },
+          payload: { eventType: "listing.published", targetUrl: `http://127.0.0.1:${address.port}/hook`, secret: "headerstest123" },
+        });
+
+        const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-hdr-l") }, payload: { title: "Webhook headers", description: "header contract", priceCents: 1000, quantity: 1 } });
+        const listingId = listing.json().id as string;
+        const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-hdr-s") }, payload: { listingId, fileName: "x.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+        const sid = session.json().sessionId as string;
+        await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-hdr-ch"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
+        await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-hdr-f") }, payload: { detectedMime: "image/jpeg" } });
+        await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("wh-hdr-p") } });
+      });
+    });
+
+    const received = await webhookReceipt;
+    expect(received.body).toContain('"event":"listing.published"');
+    expect(received.headers["x-webhook-signature"]).toBeTruthy();
+    expect(received.headers["x-webhook-timestamp"]).toBeTruthy();
+    expect(received.headers["x-localtrade-signature"]).toBe(received.headers["x-webhook-signature"]);
+    expect(received.headers["x-localtrade-event"]).toBe("listing.published");
+  });
+
   test("review image attach enforces max 5 and appeal duplicate rejected", async () => {
     const sellerToken = await login("seller@localtrade.test", "seller");
     const buyerToken = await login("buyer@localtrade.test", "buyer");
@@ -976,7 +1023,7 @@ describe("api integration with postgres", () => {
     expect(arbAttempt.json().code).toBe("ROLE_NOT_SELF_ASSIGNABLE");
   });
 
-  test("publish rejects flagged listing and listing without ready assets", async () => {
+  test("publish rejects flagged listing, listing without assets, and listing with non-ready assets", async () => {
     const adminToken = await login("admin@localtrade.test", "admin");
     const sellerToken = await login("seller@localtrade.test", "seller");
 
@@ -1003,6 +1050,38 @@ describe("api integration with postgres", () => {
     expect(noAssetsPublish.statusCode).toBe(409);
     expect(noAssetsPublish.json().code).toBe("LISTING_NOT_READY");
     expect(noAssetsPublish.json().message).toBe("NO_ASSETS");
+
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    const processingListing = await app.inject({
+      method: "POST",
+      url: "/api/listings",
+      headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("pub-processing") },
+      payload: { title: "processing listing", description: "desc", priceCents: 1000, quantity: 1 },
+    });
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'processing', '/tmp/fake')",
+      [processingListing.json().id, sellerId, "processing.jpg"],
+    );
+    const processingPublish = await app.inject({ method: "POST", url: `/api/listings/${processingListing.json().id}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("pub-processing-p") } });
+    expect(processingPublish.statusCode).toBe(409);
+    expect(processingPublish.json().code).toBe("LISTING_NOT_READY");
+    expect(processingPublish.json().message).toBe("ASSETS_NOT_READY");
+
+    const failedListing = await app.inject({
+      method: "POST",
+      url: "/api/listings",
+      headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("pub-failed") },
+      payload: { title: "failed listing", description: "desc", priceCents: 1000, quantity: 1 },
+    });
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'failed', '/tmp/fake')",
+      [failedListing.json().id, sellerId, "failed.jpg"],
+    );
+    const failedPublish = await app.inject({ method: "POST", url: `/api/listings/${failedListing.json().id}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("pub-failed-p") } });
+    expect(failedPublish.statusCode).toBe(409);
+    expect(failedPublish.json().code).toBe("LISTING_NOT_READY");
+    expect(failedPublish.json().message).toBe("ASSETS_NOT_READY");
   });
 
   test("orders list returns actor-scoped rows", async () => {
@@ -1625,10 +1704,19 @@ describe("api integration with postgres", () => {
     const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sr-l") }, payload: { title: "sort reviews", description: "desc", priceCents: 1000, quantity: 5 } });
     const listingId = listing.json().id as string;
     const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sr-s") }, payload: { listingId, fileName: "x.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+    const assetId = session.json().assetId as string;
     const sid = session.json().sessionId as string;
     await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sr-c"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
     await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sr-f") }, payload: { detectedMime: "image/jpeg" } });
-    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sr-p") } });
+    let assetStatus = "processing";
+    for (let i = 0; i < 30 && assetStatus !== "ready"; i += 1) {
+      const row = await pool.query("SELECT status FROM assets WHERE id = $1", [assetId]);
+      assetStatus = String(row.rows[0]?.status ?? "processing");
+      if (assetStatus !== "ready") await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(assetStatus).toBe("ready");
+    const publish = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sr-p") } });
+    expect(publish.statusCode).toBe(200);
 
     const createReviewedOrder = async (seed: string, rating: number, body: string) => {
       const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders(`sr-o-${seed}`) }, payload: { listingId, quantity: 1 } });
@@ -1917,10 +2005,19 @@ describe("api integration with postgres", () => {
     const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-l") }, payload: { title: "cancel state", description: "desc", priceCents: 1000, quantity: 3 } });
     const listingId = listing.json().id as string;
     const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-s") }, payload: { listingId, fileName: "x.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+    const assetId = session.json().assetId as string;
     const sid = session.json().sessionId as string;
     await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-c"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
     await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-f") }, payload: { detectedMime: "image/jpeg" } });
-    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-p") } });
+    let assetStatus = "processing";
+    for (let i = 0; i < 30 && assetStatus !== "ready"; i += 1) {
+      const row = await pool.query("SELECT status FROM assets WHERE id = $1", [assetId]);
+      assetStatus = String(row.rows[0]?.status ?? "processing");
+      if (assetStatus !== "ready") await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(assetStatus).toBe("ready");
+    const publish = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-p") } });
+    expect(publish.statusCode).toBe(200);
     const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("co-o") }, payload: { listingId, quantity: 1 } });
     const orderId = order.json().id as string;
     await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("co-pay") }, payload: { orderId, tenderType: "cash", amountCents: 1000, transactionKey: "tx-co-1" } });
@@ -2251,5 +2348,172 @@ describe("api integration with postgres", () => {
     });
     expect(overLimit.statusCode).toBe(400);
     expect(overLimit.json().code).toBe("FILE_TOO_LARGE");
+  });
+
+  test("finalize upload returns 202 and worker completes asynchronously", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+
+    const listing = await app.inject({
+      method: "POST",
+      url: "/api/listings",
+      headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("async-l") },
+      payload: { title: "async media", description: "desc", priceCents: 1000, quantity: 1 },
+    });
+    const listingId = listing.json().id as string;
+
+    const session = await app.inject({
+      method: "POST",
+      url: "/api/media/upload-sessions",
+      headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("async-s") },
+      payload: {
+        listingId,
+        fileName: "video.mp4",
+        sizeBytes: 20,
+        extension: "mp4",
+        mimeType: "video/mp4",
+        totalChunks: 1,
+        chunkSizeBytes: 5 * 1024 * 1024,
+      },
+    });
+    const sid = session.json().sessionId as string;
+    const assetId = session.json().assetId as string;
+    await app.inject({
+      method: "PUT",
+      url: `/api/media/upload-sessions/${sid}/chunks/0`,
+      headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("async-c"), "content-type": "application/octet-stream" },
+      payload: Buffer.from([0x00, 0x00, 0x00, 0x14, 0x66, 0x74, 0x79, 0x70, 0x69, 0x73, 0x6f, 0x6d, 0x00, 0x00, 0x00, 0x00]),
+    });
+
+    const finalize = await app.inject({
+      method: "POST",
+      url: `/api/media/upload-sessions/${sid}/finalize`,
+      headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("async-f") },
+      payload: { detectedMime: "video/mp4" },
+    });
+    expect(finalize.statusCode).toBe(202);
+    expect(finalize.json().status).toBe("processing");
+
+    const firstRead = await pool.query("SELECT status FROM assets WHERE id = $1", [assetId]);
+    expect(["processing", "ready"]).toContain(String(firstRead.rows[0].status));
+
+    let status = String(firstRead.rows[0].status);
+    for (let i = 0; i < 30 && status !== "ready"; i += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const row = await pool.query("SELECT status FROM assets WHERE id = $1", [assetId]);
+      status = String(row.rows[0].status);
+    }
+    expect(status).toBe("ready");
+  });
+
+  test("store credit capture is safe under parallel requests", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+
+    const buyerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${buyerToken}` } });
+    const buyerId = buyerMe.json().id as string;
+    await app.inject({
+      method: "POST",
+      url: `/api/admin/users/${buyerId}/store-credit`,
+      headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("sc-credit") },
+      payload: { amountCents: 1000, note: "concurrency test" },
+    });
+
+    const createPublishedListing = async (seed: string) => {
+      const listing = await app.inject({
+        method: "POST",
+        url: "/api/listings",
+        headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders(`sc-l-${seed}`) },
+        payload: { title: `sc-${seed}`, description: "desc", priceCents: 1000, quantity: 2 },
+      });
+      const listingId = listing.json().id as string;
+      const session = await app.inject({
+        method: "POST",
+        url: "/api/media/upload-sessions",
+        headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders(`sc-s-${seed}`) },
+        payload: { listingId, fileName: `${seed}.jpg`, sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 },
+      });
+      const sid = session.json().sessionId as string;
+      const assetId = session.json().assetId as string;
+      await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders(`sc-c-${seed}`), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
+      await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders(`sc-f-${seed}`) }, payload: { detectedMime: "image/jpeg" } });
+      let status = "processing";
+      for (let i = 0; i < 30 && status !== "ready"; i += 1) {
+        const row = await pool.query("SELECT status FROM assets WHERE id = $1", [assetId]);
+        status = String(row.rows[0]?.status ?? "processing");
+        if (status !== "ready") {
+          await new Promise((resolve) => setTimeout(resolve, 50));
+        }
+      }
+      expect(status).toBe("ready");
+
+      const publish = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders(`sc-p-${seed}`) } });
+      expect(publish.statusCode).toBe(200);
+      return listingId;
+    };
+
+    const [listingA, listingB] = await Promise.all([createPublishedListing("a"), createPublishedListing("b")]);
+
+    const orderA = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("sc-o-a") }, payload: { listingId: listingA, quantity: 1 } });
+    const orderB = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("sc-o-b") }, payload: { listingId: listingB, quantity: 1 } });
+    const orderAId = orderA.json().id as string;
+    const orderBId = orderB.json().id as string;
+
+    const [capA, capB] = await Promise.all([
+      app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sc-pay-a") }, payload: { orderId: orderAId, tenderType: "store_credit", amountCents: 1000, transactionKey: "tx-sc-a" } }),
+      app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sc-pay-b") }, payload: { orderId: orderBId, tenderType: "store_credit", amountCents: 1000, transactionKey: "tx-sc-b" } }),
+    ]);
+
+    const results = [capA, capB];
+    const successCount = results.filter((r) => r.statusCode === 201).length;
+    const failureCount = results.filter((r) => r.statusCode === 409).length;
+    expect(successCount).toBe(1);
+    expect(failureCount).toBe(1);
+    const failure = results.find((r) => r.statusCode === 409)!;
+    expect(failure.json().code).toBe("INSUFFICIENT_STORE_CREDIT");
+  });
+
+  test("review image attach rejects assets that are not ready", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-l") }, payload: { title: "ready-asset check", description: "desc", priceCents: 1000, quantity: 2 } });
+    const listingId = listing.json().id as string;
+    const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-s") }, payload: { listingId, fileName: "base.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+    const sid = session.json().sessionId as string;
+    await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-c"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
+    await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-f") }, payload: { detectedMime: "image/jpeg" } });
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-p") } });
+
+    const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ra-o") }, payload: { listingId, quantity: 1 } });
+    const orderId = order.json().id as string;
+    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-pay") }, payload: { orderId, tenderType: "cash", amountCents: 1000, transactionKey: "tx-ra-1" } });
+    await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ra-comp") }, payload: { note: "done" } });
+    const review = await app.inject({ method: "POST", url: "/api/reviews", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ra-r") }, payload: { orderId, rating: 5, body: "good" } });
+    const reviewId = review.json().id as string;
+
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    const notReadyAsset = await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'processing', '/tmp/fake') RETURNING id",
+      [listingId, sellerId, "processing.jpg"],
+    );
+
+    const attach = await app.inject({ method: "POST", url: `/api/reviews/${reviewId}/images`, headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ra-att") }, payload: { assetId: notReadyAsset.rows[0].id } });
+    expect(attach.statusCode).toBe(409);
+    expect(attach.json().code).toBe("ASSET_NOT_READY");
+  });
+
+  test("docs route can be disabled by configuration", async () => {
+    const previous = config.docsEnabled;
+    config.docsEnabled = false;
+    const isolated = buildServer();
+    try {
+      const res = await isolated.inject({ method: "GET", url: "/docs" });
+      expect(res.statusCode).toBe(404);
+    } finally {
+      await isolated.close();
+      config.docsEnabled = previous;
+    }
   });
 });

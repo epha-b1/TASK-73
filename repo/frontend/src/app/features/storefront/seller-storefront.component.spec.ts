@@ -2,6 +2,7 @@ import { TestBed } from '@angular/core/testing';
 import { convertToParamMap } from '@angular/router';
 import { NoopAnimationsModule } from '@angular/platform-browser/animations';
 import { ActivatedRoute } from '@angular/router';
+import { provideRouter } from '@angular/router';
 import { SellerStorefrontComponent } from './seller-storefront.component';
 import { ApiService } from '../../core/api.service';
 import { AuthService } from '../../core/auth.service';
@@ -11,6 +12,7 @@ describe('SellerStorefrontComponent', () => {
     await TestBed.configureTestingModule({
       imports: [SellerStorefrontComponent, NoopAnimationsModule],
       providers: [
+        provideRouter([]),
         {
           provide: ActivatedRoute,
           useValue: { snapshot: { paramMap: convertToParamMap({ sellerId: '11111111-1111-1111-1111-111111111111' }) } },
@@ -50,7 +52,7 @@ describe('SellerStorefrontComponent', () => {
 
     const fixture = TestBed.createComponent(SellerStorefrontComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await waitForReviews(fixture);
     const component = fixture.componentInstance;
     if (!component.reviews().length) {
       component.reviews.set([
@@ -71,4 +73,16 @@ describe('SellerStorefrontComponent', () => {
     expect(text).toContain('Under Appeal');
     expect(text).toContain('Removed by Arbitration');
   });
+
+  async function waitForReviews(fixture: ReturnType<typeof TestBed.createComponent<SellerStorefrontComponent>>) {
+    for (let i = 0; i < 30; i += 1) {
+      await Promise.resolve();
+      fixture.detectChanges();
+      if (fixture.componentInstance.reviews().length > 0 || fixture.componentInstance.error()) {
+        return;
+      }
+    }
+    await fixture.whenStable();
+    fixture.detectChanges();
+  }
 });

@@ -28,4 +28,6 @@ export const config = {
   mediaRootPath: process.env.MEDIA_ROOT_PATH ?? "/tmp/localtrade-media",
   chunkRootPath: process.env.CHUNK_ROOT_PATH ?? "/tmp/localtrade-chunks",
   webhookAllowedCidrs: (process.env.WEBHOOK_ALLOWED_CIDRS ?? "127.0.0.1/32,10.0.0.0/8,192.168.0.0/16").split(","),
+  docsEnabled: (process.env.DOCS_ENABLED ?? (nodeEnv === "production" ? "false" : "true")) === "true",
+  assetWorkerPollMs: Number(process.env.ASSET_WORKER_POLL_MS ?? 100),
 };

@@ -18,7 +18,6 @@ docker compose up --build
 ### Services
 - `postgres`: PostgreSQL database.
 - `api`: Fastify backend.
-- `worker`: async jobs processor.
 - `frontend`: Angular app host.
 
 ### Health Checks
@@ -35,15 +34,14 @@ docker compose up --build
 | DATABASE_URL | yes | PostgreSQL connection string |
 | JWT_SECRET | yes | JWT signing secret |
 | JWT_ACCESS_TTL_SEC | yes | Access token TTL seconds |
-| JWT_REFRESH_TTL_SEC | yes | Refresh token TTL seconds |
 | RATE_LIMIT_PER_MIN | yes | Requests per minute per user (default 60) |
 | ENCRYPTION_KEY_HEX | yes | 32-byte AES key (hex) |
 | MEDIA_ROOT_PATH | yes | On-prem object storage path |
-| BACKUP_ROOT_PATH | yes | Backup output path |
+| CHUNK_ROOT_PATH | yes | Upload chunk temp path |
 | SIGNED_URL_SECRET | yes | HMAC secret for asset URL signing |
 | SIGNED_URL_TTL_MIN | no | Signed URL lifetime minutes (default 15) |
 | WEBHOOK_ALLOWED_CIDRS | yes | Comma-separated local CIDRs |
-| WEBHOOK_TIMEOUT_MS | no | Outbound webhook timeout |
+| CORS_ALLOWED_ORIGINS | yes | Allowed frontend origins |
 | NONCE_WINDOW_SEC | no | Replay window, default 300 |
 
 ## 3. Backup and Restore
@@ -65,5 +63,8 @@ docker compose up --build
 docker compose logs -f api
 
 # manual backup trigger
-docker compose exec api npm run backup
+curl -X POST http://localhost:3000/api/admin/backups/run \
+  -H "Authorization: Bearer <admin-access-token>" \
+  -H "X-Request-Nonce: <unique-nonce>" \
+  -H "X-Request-Timestamp: <unix-seconds>"
 ```

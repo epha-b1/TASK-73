@@ -12,6 +12,13 @@ import { mediaRepository } from "../repositories/media-repository.js";
 const execFileAsync = promisify(execFile);
 const BACKUP_RETENTION_DAYS = 30;
 const NIGHTLY_BACKUP_MS = 24 * 60 * 60 * 1000;
+const STALE_RECOVERY_MS = 5 * 60 * 1000;
+
+let assetWorkerTimer: NodeJS.Timeout | null = null;
+let staleRecoveryTimer: NodeJS.Timeout | null = null;
+let nightlyBackupTimer: NodeJS.Timeout | null = null;
+let assetWorkerRunning = false;
+let staleRecoveryRunning = false;
 
 function encryptBuffer(value: Buffer) {
   const iv = randomBytes(12);
@@ -140,14 +147,77 @@ export async function processAssetPostprocessJobs(limit = 20) {
       }
       const storagePath = String(asset.storage_path);
       const extension = String(asset.extension);
-      const optimization = await optimizeAsset(storagePath, extension);
-      const metadata = await extractMetadata(storagePath, extension);
-      await mediaRepository.updateAssetMetadata(assetId, { ...metadata, ...optimization });
+      let optimization: Record<string, unknown> = {};
+      try {
+        optimization = await optimizeAsset(storagePath, extension);
+      } catch {
+        const size = (await stat(storagePath)).size;
+        optimization = {
+          optimizationMode: "postprocess_skipped",
+          originalBytes: size,
+          optimizedBytes: size,
+        };
+      }
+
+      let metadata: Record<string, unknown> = {};
+      try {
+        metadata = await extractMetadata(storagePath, extension);
+      } catch {
+        metadata = {};
+      }
+
+      await mediaRepository.markAssetReady(assetId, { ...metadata, ...optimization });
       await mediaRepository.completeJob(job.id);
     } catch (error) {
+      const assetId = String(job.payload_json.assetId ?? "");
+      if (assetId) {
+        await mediaRepository.markAssetFailed(assetId);
+      }
       await mediaRepository.failJob(job.id, error instanceof Error ? error.message : "asset postprocess failed");
     }
   }
+}
+
+async function runAssetWorkerTick() {
+  if (assetWorkerRunning) return;
+  assetWorkerRunning = true;
+  try {
+    await processAssetPostprocessJobs(20);
+  } finally {
+    assetWorkerRunning = false;
+  }
+}
+
+export function signalAssetWorker() {
+  void runAssetWorkerTick();
+}
+
+export function startAssetPostprocessScheduler() {
+  if (assetWorkerTimer) return;
+  void runAssetWorkerTick();
+  assetWorkerTimer = setInterval(() => {
+    void runAssetWorkerTick();
+  }, Math.max(25, config.assetWorkerPollMs));
+  assetWorkerTimer.unref?.();
+}
+
+async function runStaleRecoveryTick() {
+  if (staleRecoveryRunning) return;
+  staleRecoveryRunning = true;
+  try {
+    await recoverStaleJobs();
+  } finally {
+    staleRecoveryRunning = false;
+  }
+}
+
+export function startStaleRecoveryScheduler() {
+  if (staleRecoveryTimer) return;
+  void runStaleRecoveryTick();
+  staleRecoveryTimer = setInterval(() => {
+    void runStaleRecoveryTick();
+  }, STALE_RECOVERY_MS);
+  staleRecoveryTimer.unref?.();
 }
 
 async function createEncryptedBackupFile() {
@@ -193,8 +263,6 @@ export async function processBackupJobs(limit = 5) {
   }
 }
 
-let nightlyBackupTimer: NodeJS.Timeout | null = null;
-
 export function startNightlyBackupScheduler() {
   if (nightlyBackupTimer) return;
 
@@ -212,4 +280,19 @@ export function startNightlyBackupScheduler() {
     void run();
   }, NIGHTLY_BACKUP_MS);
   nightlyBackupTimer.unref?.();
+}
+
+export function stopWorkerSchedulers() {
+  if (assetWorkerTimer) {
+    clearInterval(assetWorkerTimer);
+    assetWorkerTimer = null;
+  }
+  if (staleRecoveryTimer) {
+    clearInterval(staleRecoveryTimer);
+    staleRecoveryTimer = null;
+  }
+  if (nightlyBackupTimer) {
+    clearInterval(nightlyBackupTimer);
+    nightlyBackupTimer = null;
+  }
 }

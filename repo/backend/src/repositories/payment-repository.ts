@@ -18,6 +18,7 @@ export const paymentRepository = {
       if (o.total_cents !== input.amountCents) return { error: "AMOUNT_MISMATCH" as const };
 
       if (input.tenderType === "store_credit") {
+        await client.query("SELECT pg_advisory_xact_lock(hashtext($1), hashtext('store_credit'))", [o.buyer_id]);
         const bal = await client.query(
           `SELECT COALESCE(SUM(CASE WHEN entry_type = 'credit' THEN amount_cents ELSE -amount_cents END), 0) AS balance
            FROM store_credit_ledger WHERE buyer_id = $1`,

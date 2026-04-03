@@ -8,12 +8,14 @@ const {
   claimNextBackupJobMock,
   completeJobMock,
   failJobMock,
+  poolQueryMock,
 } = vi.hoisted(() => ({
   mediaRootPath: `/tmp/localtrade-worker-tests-${Date.now()}-${Math.random().toString(16).slice(2)}`,
   execFileAsyncMock: vi.fn(),
   claimNextBackupJobMock: vi.fn(),
   completeJobMock: vi.fn(),
   failJobMock: vi.fn(),
+  poolQueryMock: vi.fn(),
 }));
 
 vi.mock("node:child_process", () => ({
@@ -47,7 +49,7 @@ vi.mock("../src/repositories/media-repository.js", () => ({
 
 vi.mock("../src/db/pool.js", () => ({
   pool: {
-    query: vi.fn(),
+    query: poolQueryMock,
   },
 }));
 
@@ -55,11 +57,12 @@ vi.mock("sharp", () => ({
   default: vi.fn(),
 }));
 
-import { processBackupJobs } from "../src/jobs/worker.js";
+import { processBackupJobs, startStaleRecoveryScheduler, stopWorkerSchedulers } from "../src/jobs/worker.js";
 
 describe("backup worker jobs", () => {
   beforeEach(async () => {
     vi.clearAllMocks();
+    vi.useRealTimers();
     execFileAsyncMock.mockResolvedValue({ stdout: "-- mock dump --", stderr: "" });
     await rm(mediaRootPath, { recursive: true, force: true });
     await mkdir(path.join(mediaRootPath, "backups"), { recursive: true });
@@ -108,5 +111,22 @@ describe("backup worker jobs", () => {
 
     expect(completeJobMock).not.toHaveBeenCalled();
     expect(failJobMock).toHaveBeenCalledWith("job-backup-2", "pg_dump failed");
+  });
+
+  test("stale-job recovery scheduler runs immediately and every 5 minutes", async () => {
+    vi.useFakeTimers();
+    poolQueryMock.mockResolvedValue({ rowCount: 0, rows: [] });
+
+    startStaleRecoveryScheduler();
+    await vi.runOnlyPendingTimersAsync();
+
+    expect(poolQueryMock).toHaveBeenCalled();
+    const initialCalls = poolQueryMock.mock.calls.length;
+
+    await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+    expect(poolQueryMock.mock.calls.length).toBeGreaterThan(initialCalls);
+
+    stopWorkerSchedulers();
+    vi.useRealTimers();
   });
 });

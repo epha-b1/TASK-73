@@ -7,7 +7,7 @@ import { hmacSha256 } from "../security/hmac.js";
 import { fileStorage } from "../storage/file-storage.js";
 import type { AuthUser } from "../types/auth.js";
 import { HttpError } from "../utils/http-error.js";
-import { processAssetPostprocessJobs } from "../jobs/worker.js";
+import { signalAssetWorker } from "../jobs/worker.js";
 
 const mimeByExt: Record<string, string> = { jpg: "image/jpeg", png: "image/png", mp4: "video/mp4", pdf: "application/pdf" };
 const reviewImageMimeByExt: Record<string, string> = { jpg: "image/jpeg", png: "image/png" };
@@ -139,7 +139,7 @@ export const mediaService = {
     for (const chunk of chunks) {
       await fileStorage.removeFile(chunk.chunk_path);
     }
-    await processAssetPostprocessJobs(5);
+    signalAssetWorker();
     await auditRepository.create(actor, "media.finalize", "asset", session.asset_id);
     return { assetId: session.asset_id, status: "processing" };
   },

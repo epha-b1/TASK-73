@@ -52,10 +52,9 @@ describe('UploadComponent', () => {
     }).compileComponents();
   });
 
-  it('flags unsupported file types as invalid', async () => {
+  it('flags unsupported file types as invalid', () => {
     const fixture = TestBed.createComponent(UploadComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
 
     const component = fixture.componentInstance;
     const badFile = new File(['invalid'], 'malware.exe', { type: 'application/octet-stream' });
@@ -70,7 +69,6 @@ describe('UploadComponent', () => {
   it('retries failed chunk and completes upload flow', async () => {
     const fixture = TestBed.createComponent(UploadComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
 
     const component = fixture.componentInstance;
     const file = new File(['chunk-data'], 'photo.jpg', { type: 'image/jpeg' });

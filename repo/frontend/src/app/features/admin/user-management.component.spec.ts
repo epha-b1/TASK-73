@@ -45,7 +45,7 @@ describe('UserManagementComponent', () => {
   it('loads users on init and stores rows', async () => {
     const fixture = TestBed.createComponent(UserManagementComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     expect(apiGet).toHaveBeenCalledWith('/api/admin/users?page=1&pageSize=20');
@@ -56,7 +56,7 @@ describe('UserManagementComponent', () => {
   it('sends status update request and shows success toast', async () => {
     const fixture = TestBed.createComponent(UserManagementComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     const row = component.rows()[0];
@@ -69,7 +69,7 @@ describe('UserManagementComponent', () => {
   it('reports API failures from role update', async () => {
     const fixture = TestBed.createComponent(UserManagementComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     component.toggleEditRoles('user-1');
@@ -81,4 +81,16 @@ describe('UserManagementComponent', () => {
     expect(component.error()).toBe('Role update failed');
     expect(toastError).toHaveBeenCalledWith('Role update failed');
   });
+
+  async function componentReady(fixture: ReturnType<typeof TestBed.createComponent<UserManagementComponent>>) {
+    for (let i = 0; i < 20; i += 1) {
+      await Promise.resolve();
+      fixture.detectChanges();
+      if (fixture.componentInstance.rows().length > 0 || fixture.componentInstance.error()) {
+        return;
+      }
+    }
+    await fixture.whenStable();
+    fixture.detectChanges();
+  }
 });

@@ -27,6 +27,15 @@ function isReviewImageAsset(asset: { extension?: string | null; mime_type?: stri
   return ["jpg", "png"].includes(ext) && ["image/jpeg", "image/png"].includes(mime);
 }
 
+function assertReviewImageAssetReady(asset: { status?: string | null; extension?: string | null; mime_type?: string | null }) {
+  if (asset.status !== "ready") {
+    throw new HttpError(409, "ASSET_NOT_READY", "Review image asset is not ready");
+  }
+  if (!isReviewImageAsset(asset)) {
+    throw new HttpError(400, "INVALID_REVIEW_IMAGE_TYPE", "Review attachments must be JPG or PNG images");
+  }
+}
+
 export const reviewService = {
   async create(input: { orderId: string; buyerId: string; rating: number; body: string; imageAssetIds: string[] }, actor: AuthUser) {
     const order = await orderRepository.findWithListing(input.orderId);
@@ -43,9 +52,7 @@ export const reviewService = {
       if (asset.listing_id !== order.listing_id) {
         throw new HttpError(403, "ASSET_NOT_ACCESSIBLE", "Asset does not belong to this listing");
       }
-      if (!isReviewImageAsset(asset)) {
-        throw new HttpError(400, "INVALID_REVIEW_IMAGE_TYPE", "Review attachments must be JPG or PNG images");
-      }
+      assertReviewImageAssetReady(asset);
     }
 
     const reviewId = await reviewRepository.create({
@@ -112,9 +119,7 @@ export const reviewService = {
     if (asset.listing_id !== order.listing_id) {
       throw new HttpError(403, "ASSET_NOT_ACCESSIBLE", "Asset does not belong to this listing");
     }
-    if (!isReviewImageAsset(asset)) {
-      throw new HttpError(400, "INVALID_REVIEW_IMAGE_TYPE", "Review attachments must be JPG or PNG images");
-    }
+    assertReviewImageAssetReady(asset);
 
     await reviewRepository.attachImage(input.reviewId, input.assetId);
     await auditRepository.create(actor, "review.image.attach", "review", input.reviewId, undefined, { assetId: input.assetId });

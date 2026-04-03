@@ -72,13 +72,34 @@ export const mediaRepository = {
     await withTx(async (client) => {
       await client.query(
         `UPDATE assets
-         SET status = 'ready', storage_path = $1, fingerprint_sha256 = $2, metadata_json = $3, updated_at = NOW()
+         SET status = 'processing', storage_path = $1, fingerprint_sha256 = $2, metadata_json = $3, updated_at = NOW()
          WHERE id = $4`,
         [input.storagePath, input.fingerprint, JSON.stringify(input.metadata), input.assetId],
       );
       await client.query("UPDATE upload_sessions SET status = 'finalized' WHERE id = $1", [input.sessionId]);
       await client.query("INSERT INTO jobs(type, payload_json, status) VALUES('asset_postprocess', $1, 'queued')", [JSON.stringify({ assetId: input.assetId })]);
     });
+  },
+
+  async markAssetReady(assetId: string, metadata: Record<string, unknown>) {
+    await pool.query(
+      `UPDATE assets
+       SET status = 'ready',
+           metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $2::jsonb,
+           updated_at = NOW()
+       WHERE id = $1
+         AND status = 'processing'`,
+      [assetId, JSON.stringify(metadata)],
+    );
+  },
+
+  async markAssetFailed(assetId: string) {
+    await pool.query(
+      `UPDATE assets
+       SET status = 'failed', updated_at = NOW()
+       WHERE id = $1`,
+      [assetId],
+    );
   },
 
   async claimNextAssetPostprocessJob() {
@@ -103,16 +124,6 @@ export const mediaRepository = {
 
   async failJob(jobId: string, message: string) {
     await pool.query("UPDATE jobs SET status = 'failed', locked_at = NULL, last_error = $2, updated_at = NOW() WHERE id = $1", [jobId, message]);
-  },
-
-  async updateAssetMetadata(assetId: string, metadata: Record<string, unknown>) {
-    await pool.query(
-      `UPDATE assets
-       SET metadata_json = COALESCE(metadata_json, '{}'::jsonb) || $2::jsonb,
-           updated_at = NOW()
-       WHERE id = $1`,
-      [assetId, JSON.stringify(metadata)],
-    );
   },
 
   async listAssetStatusesForListing(listingId: string) {

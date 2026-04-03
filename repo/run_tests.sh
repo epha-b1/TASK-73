@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-DATABASE_URL="postgres://localtrade:localtrade@localhost:5432/localtrade"
+POSTGRES_PORT="55432"
+DATABASE_URL="postgres://localtrade:localtrade@localhost:${POSTGRES_PORT}/localtrade"
+COMPOSE_PROJECT_NAME="localtrade73"
 
 backend_passed=0
 backend_failed=0
@@ -44,7 +46,7 @@ PY
 }
 
 echo "Starting postgres test dependency..."
-docker compose up -d postgres
+POSTGRES_PORT="$POSTGRES_PORT" docker compose -p "$COMPOSE_PROJECT_NAME" up -d postgres
 
 echo "Installing backend dependencies..."
 npm --prefix backend ci

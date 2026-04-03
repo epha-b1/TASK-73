@@ -50,7 +50,7 @@ describe('KeywordRulesComponent', () => {
   it('loads rules on init', async () => {
     const fixture = TestBed.createComponent(KeywordRulesComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     expect(apiGet).toHaveBeenCalledWith('/api/admin/content-rules');
@@ -60,7 +60,7 @@ describe('KeywordRulesComponent', () => {
   it('toggles a rule active state', async () => {
     const fixture = TestBed.createComponent(KeywordRulesComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     await component.toggle(component.rules()[0]);
@@ -72,7 +72,7 @@ describe('KeywordRulesComponent', () => {
   it('deletes a rule and shows info toast', async () => {
     const fixture = TestBed.createComponent(KeywordRulesComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     await component.remove(component.rules()[0]);
@@ -84,7 +84,7 @@ describe('KeywordRulesComponent', () => {
   it('creates a rule and resets form', async () => {
     const fixture = TestBed.createComponent(KeywordRulesComponent);
     fixture.detectChanges();
-    await fixture.whenStable();
+    await componentReady(fixture);
 
     const component = fixture.componentInstance;
     component.form.setValue({ ruleType: 'regex', pattern: 'forbid\\s+me' });
@@ -94,4 +94,18 @@ describe('KeywordRulesComponent', () => {
     expect(component.form.getRawValue()).toEqual({ ruleType: 'keyword', pattern: '' });
     expect(toastSuccess).toHaveBeenCalledWith('Rule created');
   });
+
+  async function componentReady(fixture: ReturnType<typeof TestBed.createComponent<KeywordRulesComponent>>) {
+    for (let i = 0; i < 120; i += 1) {
+      await Promise.resolve();
+      fixture.detectChanges();
+      if (!fixture.componentInstance.loading() && (fixture.componentInstance.rules().length > 0 || fixture.componentInstance.error())) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    }
+    await fixture.whenStable();
+    await Promise.resolve();
+    fixture.detectChanges();
+  }
 });

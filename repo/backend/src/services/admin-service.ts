@@ -24,7 +24,8 @@ export async function dispatchWebhookEvent(eventType: string, payload: Record<st
         continue;
       }
       const secret = decryptText(sub.secret_enc);
-      const body = JSON.stringify({ event: eventType, data: payload, ts: Date.now() });
+      const timestamp = Date.now();
+      const body = JSON.stringify({ event: eventType, data: payload, ts: timestamp });
       const sig = hmacSha256(body, secret);
       const parsed = new URL(sub.target_url);
       const options = {
@@ -35,22 +36,42 @@ export async function dispatchWebhookEvent(eventType: string, payload: Record<st
         headers: {
           "Content-Type": "application/json",
           "Content-Length": Buffer.byteLength(body),
+          "X-Webhook-Signature": `sha256=${sig}`,
+          "X-Webhook-Timestamp": String(timestamp),
           "X-LocalTrade-Signature": `sha256=${sig}`,
           "X-LocalTrade-Event": eventType,
         },
       };
       const requester = parsed.protocol === "https:" ? httpsRequest : httpRequest;
+      let deliveryError: string | null = null;
       await new Promise<void>((resolve) => {
         const req = requester(options, (res) => {
+          if ((res.statusCode ?? 0) >= 400) {
+            deliveryError = `HTTP_${res.statusCode}`;
+          }
           res.resume();
           resolve();
         });
-        req.on("error", () => resolve());
+        req.on("error", (error) => {
+          deliveryError = error instanceof Error ? error.message : "request_error";
+          resolve();
+        });
         req.write(body);
         req.end();
       });
+      if (deliveryError) {
+        await auditRepository.create(null, "webhook.dispatch.failed", "webhook_subscription", sub.id, undefined, {
+          eventType,
+          targetUrl: sub.target_url,
+          error: deliveryError,
+        });
+      }
     } catch {
-      // fire-and-forget per spec; failures are logged via audit
+      await auditRepository.create(null, "webhook.dispatch.failed", "webhook_subscription", sub.id, undefined, {
+        eventType,
+        targetUrl: sub.target_url,
+        error: "unexpected_dispatch_error",
+      });
     }
   }
 }
