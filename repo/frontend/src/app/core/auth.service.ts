@@ -6,13 +6,9 @@ export type RoleCode = 'buyer' | 'seller' | 'moderator' | 'arbitrator' | 'admin'
 
 @Injectable({ providedIn: 'root' })
 export class AuthService {
-  private readonly tokenKey = 'lt_token';
-  private readonly refreshKey = 'lt_refresh';
-  private readonly roleKey = 'lt_roles';
-
-  readonly token = signal<string | null>(localStorage.getItem(this.tokenKey));
-  readonly refreshToken = signal<string | null>(localStorage.getItem(this.refreshKey));
-  readonly roles = signal<RoleCode[]>(this.readRolesFromStorage());
+  readonly token = signal<string | null>(null);
+  readonly refreshToken = signal<string | null>(null);
+  readonly roles = signal<RoleCode[]>([]);
 
   constructor(private readonly http: HttpClient) {}
 
@@ -22,9 +18,6 @@ export class AuthService {
     this.refreshToken.set(response.refreshToken);
     const roles = this.sanitizeRoles(response.roles);
     this.roles.set(roles);
-    localStorage.setItem(this.tokenKey, response.accessToken);
-    localStorage.setItem(this.refreshKey, response.refreshToken);
-    localStorage.setItem(this.roleKey, JSON.stringify(roles));
   }
 
   async refresh(): Promise<string | null> {
@@ -33,8 +26,6 @@ export class AuthService {
     const response: any = await firstValueFrom(this.http.post('/api/auth/refresh', { refreshToken }));
     this.token.set(response.accessToken);
     this.refreshToken.set(response.refreshToken);
-    localStorage.setItem(this.tokenKey, response.accessToken);
-    localStorage.setItem(this.refreshKey, response.refreshToken);
     return response.accessToken;
   }
 
@@ -63,15 +54,6 @@ export class AuthService {
     return '/auth/login';
   }
 
-  private readRolesFromStorage(): RoleCode[] {
-    try {
-      const parsed = JSON.parse(localStorage.getItem(this.roleKey) ?? '[]');
-      return this.sanitizeRoles(parsed);
-    } catch {
-      return [];
-    }
-  }
-
   private sanitizeRoles(input: unknown): RoleCode[] {
     const allowed: RoleCode[] = ['buyer', 'seller', 'moderator', 'arbitrator', 'admin'];
     if (!Array.isArray(input)) return [];
@@ -82,8 +64,5 @@ export class AuthService {
     this.token.set(null);
     this.refreshToken.set(null);
     this.roles.set([]);
-    localStorage.removeItem(this.tokenKey);
-    localStorage.removeItem(this.refreshKey);
-    localStorage.removeItem(this.roleKey);
   }
 }

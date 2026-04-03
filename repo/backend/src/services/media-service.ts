@@ -59,8 +59,10 @@ export const mediaService = {
     const isEligibleBuyer = actor.roles.includes("buyer") && (await mediaRepository.buyerHasCompletedOrderForListing({ buyerId: actor.id, listingId: input.listingId }));
     if (!isOwnerSeller && !isEligibleBuyer) throw new HttpError(403, "FORBIDDEN", "Forbidden");
 
-    const count = await mediaRepository.countAssetsForListing(input.listingId);
-    if (count >= MAX_FILES_PER_LISTING) throw new HttpError(409, "FILE_LIMIT_REACHED", "File count limit reached");
+    if (isOwnerSeller) {
+      const count = await mediaRepository.countAssetsForListing(input.listingId);
+      if (count >= MAX_FILES_PER_LISTING) throw new HttpError(409, "FILE_LIMIT_REACHED", "File count limit reached");
+    }
 
     await fileStorage.ensureRoots();
     return mediaRepository.createAssetAndSession({ ...input, extension: ext });

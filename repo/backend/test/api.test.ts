@@ -742,6 +742,37 @@ describe("api integration with postgres", () => {
     expect(forbidden.json().code).toBe("ASSET_NOT_ACCESSIBLE");
   });
 
+  test("review image attach rejects non-image assets", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-l") }, payload: { title: "Non image", description: "desc", priceCents: 1000, quantity: 2 } });
+    const listingId = listing.json().id as string;
+    const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-s") }, payload: { listingId, fileName: "base.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+    const sid = session.json().sessionId as string;
+    await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-c"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
+    await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-f") }, payload: { detectedMime: "image/jpeg" } });
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-p") } });
+
+    const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ria-ni-o") }, payload: { listingId, quantity: 1 } });
+    const orderId = order.json().id as string;
+    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-pay") }, payload: { orderId, tenderType: "cash", amountCents: 1000, transactionKey: "tx-ria-ni" } });
+    await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ria-ni-comp") }, payload: { note: "done" } });
+    const review = await app.inject({ method: "POST", url: "/api/reviews", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ria-ni-rev") }, payload: { orderId, rating: 4, body: "review" } });
+    const reviewId = review.json().id as string;
+
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    const badAsset = await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'pdf', 'application/pdf', 10, 'ready', '/tmp/fake') RETURNING id",
+      [listingId, sellerId, "bad.pdf"],
+    );
+
+    const attach = await app.inject({ method: "POST", url: `/api/reviews/${reviewId}/images`, headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ria-ni-att") }, payload: { assetId: badAsset.rows[0].id } });
+    expect(attach.statusCode).toBe(400);
+    expect(attach.json().code).toBe("INVALID_REVIEW_IMAGE_TYPE");
+  });
+
   test("buyer cannot attach asset from unrelated listing via review create", async () => {
     const sellerToken = await login("seller@localtrade.test", "seller");
     const buyerToken = await login("buyer@localtrade.test", "buyer");

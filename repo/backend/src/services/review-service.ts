@@ -21,6 +21,12 @@ function toIsoDate(value: unknown): string {
   throw new HttpError(500, "INVALID_REVIEW_TIMESTAMP", "Invalid review timestamp");
 }
 
+function isReviewImageAsset(asset: { extension?: string | null; mime_type?: string | null }) {
+  const ext = (asset.extension ?? "").toLowerCase();
+  const mime = (asset.mime_type ?? "").toLowerCase();
+  return ["jpg", "png"].includes(ext) && ["image/jpeg", "image/png"].includes(mime);
+}
+
 export const reviewService = {
   async create(input: { orderId: string; buyerId: string; rating: number; body: string; imageAssetIds: string[] }, actor: AuthUser) {
     const order = await orderRepository.findWithListing(input.orderId);
@@ -36,6 +42,9 @@ export const reviewService = {
       }
       if (asset.listing_id !== order.listing_id) {
         throw new HttpError(403, "ASSET_NOT_ACCESSIBLE", "Asset does not belong to this listing");
+      }
+      if (!isReviewImageAsset(asset)) {
+        throw new HttpError(400, "INVALID_REVIEW_IMAGE_TYPE", "Review attachments must be JPG or PNG images");
       }
     }
 
@@ -102,6 +111,9 @@ export const reviewService = {
     if (!order) throw new HttpError(404, "ORDER_NOT_FOUND", "Order not found");
     if (asset.listing_id !== order.listing_id) {
       throw new HttpError(403, "ASSET_NOT_ACCESSIBLE", "Asset does not belong to this listing");
+    }
+    if (!isReviewImageAsset(asset)) {
+      throw new HttpError(400, "INVALID_REVIEW_IMAGE_TYPE", "Review attachments must be JPG or PNG images");
     }
 
     await reviewRepository.attachImage(input.reviewId, input.assetId);
