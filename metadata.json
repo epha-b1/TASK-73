@@ -1,8 +1,9 @@
 {
-  "task_id": "73",
-  "project_type": "repo",
-  "frontend_tech": "angular",
-  "backend_tech": "fastify",
-  "database": "postgresql",
-  "language": "typescript"
+  "prompt": "Develop a LocalTrade Marketplace Operations system for an offline-first, on-prem marketplace where sellers publish product listings with media, buyers complete transactions, and both parties build trust through verified reviews. The Angular web app provides English UI for five roles: Buyer, Seller, Moderator (content), Arbitrator (review disputes), and Administrator. Sellers create listings, upload images/videos/attachments with drag-and-drop and resumable uploads (5 MB chunks, up to 20 files per listing, 2 GB per file; JPG/PNG/MP4/PDF only), and see immediate client-side validation for file type and size plus progress and retry controls. After upload, the UI shows extracted metadata (image dimensions, duration, codec) and a Ready to Publish gate that can be blocked if the listing is flagged. Buyers place orders, view an offline payment status capture (cash, check, store credit, or imported card-terminal settlement), and once an order is marked completed they can leave a review within 14 days with a 1-5 star rating, up to 1,000 characters, and up to 5 images. The storefront displays seller credit metrics including a rolling 90-day average rating and positive-rate percentage, with configurable ranking rules such as verified purchase first, most recent, or highest rated, and clear badges when a review is under appeal or removed by arbitration. The backend uses Fastify to expose decoupled REST APIs consumed by the Angular frontend, with PostgreSQL as the system of record for users, roles/permissions (RBAC), listings, assets, orders, payments, refunds, reviews, appeals, and audit logs. Media assets are stored in on-prem object storage with signed, time-limited download URLs (default 15 minutes); transcoding/compression and metadata extraction run locally via asynchronous job queues persisted in PostgreSQL. Content safety checks are offline and deterministic: MIME sniffing, extension allow-lists, file fingerprinting to prevent re-uploads of blocked content, and keyword/regex rules for prohibited terms. Payment and refund handling is fully offline with a pluggable adapter layer that enforces idempotency on callbacks/imports using unique transaction keys. Security includes least-privilege RBAC, AES-256 encryption for sensitive fields, JWT-based API authentication, HMAC-signed webhooks, rate limiting (60 requests/minute per user), anti-injection validation, anti-privilege-escalation checks, and anti-replay using nonces and 5-minute timestamp windows.",
+  "project_type": "fullstack",
+  "frontend_language": "typescript",
+  "backend_language": "typescript",
+  "frontend_framework": "angular",
+  "backend_framework": "fastify",
+  "database": "postgresql"
 }

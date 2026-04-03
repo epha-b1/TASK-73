@@ -888,17 +888,36 @@ describe("api integration with postgres", () => {
     const listingId = listing.json().id as string;
 
     const sellerSession = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-ss") }, payload: { listingId, fileName: "cover.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+    expect(sellerSession.statusCode).toBe(201);
     const sellerSid = sellerSession.json().sessionId as string;
+    const sellerAssetId = sellerSession.json().assetId as string;
     await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sellerSid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-sc"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
-    await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sellerSid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-sf") }, payload: { detectedMime: "image/jpeg" } });
-    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-p") } });
+    const sellerFinalize = await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sellerSid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-sf") }, payload: { detectedMime: "image/jpeg" } });
+    expect(sellerFinalize.statusCode).toBe(202);
+
+    let sellerAssetStatus = "processing";
+    for (let i = 0; i < 30 && sellerAssetStatus !== "ready"; i += 1) {
+      const row = await pool.query("SELECT status FROM assets WHERE id = $1", [sellerAssetId]);
+      sellerAssetStatus = String(row.rows[0]?.status ?? "processing");
+      if (sellerAssetStatus !== "ready") {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+    }
+    expect(sellerAssetStatus).toBe("ready");
+
+    const publish = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-p") } });
+    expect(publish.statusCode).toBe(200);
 
     const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("br-o") }, payload: { listingId, quantity: 1 } });
+    expect(order.statusCode).toBe(201);
     const orderId = order.json().id as string;
-    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-pay") }, payload: { orderId, tenderType: "cash", amountCents: 1000, transactionKey: "tx-br-1" } });
-    await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-comp") }, payload: { note: "done" } });
+    const capture = await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-pay") }, payload: { orderId, tenderType: "cash", amountCents: 1000, transactionKey: "tx-br-1" } });
+    expect(capture.statusCode).toBe(201);
+    const complete = await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("br-comp") }, payload: { note: "done" } });
+    expect(complete.statusCode).toBe(200);
 
     const review = await app.inject({ method: "POST", url: "/api/reviews", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("br-r") }, payload: { orderId, rating: 5, body: "great" } });
+    expect(review.statusCode).toBe(201);
     const reviewId = review.json().id as string;
 
     const buyerSession = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("br-bs") }, payload: { listingId, fileName: "buyer.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
