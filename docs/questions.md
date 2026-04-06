@@ -1,5 +1,8 @@
 # Required Document Description: Business Logic Questions Log
 
+This file records business-level ambiguities from the prompt and implementation decisions.
+Each entry follows exactly: Question + My Understanding/Hypothesis + Solution.
+
 ## 1) Server-side MIME sniff fails after client-side validation passes
 Question: The prompt requires both client-side file type validation and server-side MIME sniffing. What happens when a file passes the client-side extension check (e.g., file.jpg) but the server detects the actual bytes are not a valid JPEG?
 My Understanding/Hypothesis: Server-side MIME sniff is authoritative; failing files must be fully rejected with no partial data retained.
