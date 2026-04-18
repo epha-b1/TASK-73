@@ -2630,4 +2630,374 @@ describe("api integration with postgres", () => {
       config.docsEnabled = previous;
     }
   });
+
+  test("GET /health/live returns ok without authentication", async () => {
+    const res = await app.inject({ method: "GET", url: "/health/live" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+  });
+
+  test("GET /health/ready returns ok and confirms DB is reachable", async () => {
+    const res = await app.inject({ method: "GET", url: "/health/ready" });
+    expect(res.statusCode).toBe(200);
+    expect(res.json()).toEqual({ ok: true });
+  });
+
+  test("GET /api/listings/:id returns readiness state for seller; buyer is 403", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+    const listingRes = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("gl-l") }, payload: { title: "Readiness check", description: "desc", priceCents: 500, quantity: 1 } });
+    const listingId = listingRes.json().id as string;
+
+    const ownView = await app.inject({ method: "GET", url: `/api/listings/${listingId}`, headers: { authorization: `Bearer ${sellerToken}` } });
+    expect(ownView.statusCode).toBe(200);
+    const body = ownView.json();
+    expect(body.id).toBe(listingId);
+    expect(body.ready).toBeDefined();
+    expect(body.reason).toBeDefined();
+
+    const buyerForbidden = await app.inject({ method: "GET", url: `/api/listings/${listingId}`, headers: { authorization: `Bearer ${buyerToken}` } });
+    expect(buyerForbidden.statusCode).toBe(403);
+  });
+
+  test("GET /api/reviews/:id returns review details without authentication", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("grv-l") }, payload: { title: "Review fetch", description: "desc", priceCents: 500, quantity: 1 } });
+    const listingId = listing.json().id as string;
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'ready', '/tmp/fake')",
+      [listingId, sellerId, "ready.jpg"],
+    );
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("grv-p") } });
+
+    const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("grv-o") }, payload: { listingId, quantity: 1 } });
+    const orderId = order.json().id as string;
+    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("grv-pay") }, payload: { orderId, tenderType: "cash", amountCents: 500, transactionKey: "tx-grv-1" } });
+    await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("grv-comp") }, payload: { note: "done" } });
+    const reviewRes = await app.inject({ method: "POST", url: "/api/reviews", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("grv-r") }, payload: { orderId, rating: 4, body: "Solid" } });
+    const reviewId = reviewRes.json().id as string;
+
+    const got = await app.inject({ method: "GET", url: `/api/reviews/${reviewId}` });
+    expect(got.statusCode).toBe(200);
+    const r = got.json();
+    expect(r.id).toBe(reviewId);
+    expect(Number(r.rating)).toBe(4);
+    expect(r.body).toBe("Solid");
+    expect(r.badges).toBeDefined();
+
+    const missing = await app.inject({ method: "GET", url: "/api/reviews/00000000-0000-0000-0000-000000000000" });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().code).toBe("REVIEW_NOT_FOUND");
+  });
+
+  test("GET /api/storefront/listings is public and supports ranking/sellerId filters", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sfl-l") }, payload: { title: "Storefront listing", description: "desc", priceCents: 500, quantity: 2 } });
+    const listingId = listing.json().id as string;
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'ready', '/tmp/fake')",
+      [listingId, sellerId, "cover.jpg"],
+    );
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("sfl-p") } });
+
+    const all = await app.inject({ method: "GET", url: "/api/storefront/listings" });
+    expect(all.statusCode).toBe(200);
+    const items = all.json().items as Array<{ id: string; seller_id: string }>;
+    expect(Array.isArray(items)).toBe(true);
+    expect(items.some((it) => it.id === listingId)).toBe(true);
+
+    const filtered = await app.inject({ method: "GET", url: `/api/storefront/listings?sellerId=${sellerId}&ranking=most_recent` });
+    expect(filtered.statusCode).toBe(200);
+    const filteredItems = filtered.json().items as Array<{ id: string }>;
+    expect(filteredItems.some((it) => it.id === listingId)).toBe(true);
+  });
+
+  test("GET /api/assets/:id returns own asset summary for seller and 403 for foreign seller", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ga-l") }, payload: { title: "Asset own", description: "desc", priceCents: 500, quantity: 1 } });
+    const listingId = listing.json().id as string;
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    const assetRow = await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'ready', '/tmp/fake') RETURNING id",
+      [listingId, sellerId, "own.jpg"],
+    );
+    const assetId = assetRow.rows[0].id as string;
+
+    const own = await app.inject({ method: "GET", url: `/api/assets/${assetId}`, headers: { authorization: `Bearer ${sellerToken}` } });
+    expect(own.statusCode).toBe(200);
+    const body = own.json();
+    expect(body.id).toBe(assetId);
+    expect(body.listingId).toBe(listingId);
+    expect(body.status).toBe("ready");
+    expect(body.mimeType).toBe("image/jpeg");
+    expect(body.sizeBytes).toBe(10);
+
+    // Foreign seller cannot read another seller's asset
+    const foreignEmail = `ga-foreign-${Date.now()}@test.local`;
+    const foreignReg = await app.inject({ method: "POST", url: "/api/auth/register", headers: replayHeaders("ga-fr"), payload: { email: foreignEmail, password: "Passw0rd1", displayName: "F Seller", roles: ["seller"] } });
+    expect(foreignReg.statusCode).toBe(201);
+    const foreignToken = await login(foreignEmail, "Passw0rd1");
+    const forbidden = await app.inject({ method: "GET", url: `/api/assets/${assetId}`, headers: { authorization: `Bearer ${foreignToken}` } });
+    expect(forbidden.statusCode).toBe(403);
+    expect(forbidden.json().code).toBe("FORBIDDEN");
+  });
+
+  test("GET /api/admin/audit-logs returns paginated items for admin and 404 for missing id", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    // Produce at least one audit row via an admin-visible action
+    await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("al-l") }, payload: { title: "Audit probe", description: "desc", priceCents: 500, quantity: 1 } });
+
+    const list = await app.inject({ method: "GET", url: "/api/admin/audit-logs?page=1&pageSize=10", headers: { authorization: `Bearer ${adminToken}` } });
+    expect(list.statusCode).toBe(200);
+    const body = list.json();
+    expect(Array.isArray(body.items)).toBe(true);
+    expect(body.page).toBe(1);
+    expect(body.pageSize).toBe(10);
+    expect(typeof body.total).toBe("number");
+    expect(body.items.length).toBeGreaterThan(0);
+
+    const first = body.items[0] as { id: string };
+    const byId = await app.inject({ method: "GET", url: `/api/admin/audit-logs/${first.id}`, headers: { authorization: `Bearer ${adminToken}` } });
+    expect(byId.statusCode).toBe(200);
+    expect(byId.json().id).toBe(first.id);
+
+    const missing = await app.inject({ method: "GET", url: "/api/admin/audit-logs/00000000-0000-0000-0000-000000000000", headers: { authorization: `Bearer ${adminToken}` } });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().code).toBe("AUDIT_LOG_NOT_FOUND");
+
+    const sellerForbidden = await app.inject({ method: "GET", url: "/api/admin/audit-logs", headers: { authorization: `Bearer ${sellerToken}` } });
+    expect(sellerForbidden.statusCode).toBe(403);
+  });
+
+  test("POST /api/admin/backups/run queues a backup job with 202 accepted for admin only", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+
+    const forbidden = await app.inject({ method: "POST", url: "/api/admin/backups/run", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("bk-forbidden") } });
+    expect(forbidden.statusCode).toBe(403);
+
+    const accepted = await app.inject({ method: "POST", url: "/api/admin/backups/run", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("bk-ok") } });
+    expect(accepted.statusCode).toBe(202);
+    const body = accepted.json();
+    expect(body.jobId).toBeDefined();
+    expect(body.status).toBe("queued");
+
+    const jobRow = await pool.query("SELECT type FROM jobs WHERE id = $1", [body.jobId]);
+    expect(jobRow.rows[0]?.type).toBe("backup");
+  });
+
+  test("POST /api/admin/content-rules/:id/test returns match outcome against provided text", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const created = await app.inject({ method: "POST", url: "/api/admin/content-rules", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("crt-c") }, payload: { ruleType: "keyword", pattern: "contraband", active: true } });
+    expect(created.statusCode).toBe(201);
+    const ruleId = created.json().id as string;
+
+    const matched = await app.inject({ method: "POST", url: `/api/admin/content-rules/${ruleId}/test`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("crt-m") }, payload: { text: "this has contraband in it" } });
+    expect(matched.statusCode).toBe(200);
+    expect(matched.json().matched).toBe(true);
+    expect(matched.json().matchDetail).toBeTruthy();
+
+    const notMatched = await app.inject({ method: "POST", url: `/api/admin/content-rules/${ruleId}/test`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("crt-nm") }, payload: { text: "clean safe content" } });
+    expect(notMatched.statusCode).toBe(200);
+    expect(notMatched.json().matched).toBe(false);
+    expect(notMatched.json().matchDetail).toBeNull();
+
+    const missing = await app.inject({ method: "POST", url: "/api/admin/content-rules/00000000-0000-0000-0000-000000000000/test", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("crt-404") }, payload: { text: "x" } });
+    expect(missing.statusCode).toBe(404);
+    expect(missing.json().code).toBe("RULE_NOT_FOUND");
+  });
+
+  test("GET /api/admin/jobs + POST /api/admin/jobs/:id/retry enforce admin auth and status transition", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+
+    const forbidden = await app.inject({ method: "GET", url: "/api/admin/jobs", headers: { authorization: `Bearer ${sellerToken}` } });
+    expect(forbidden.statusCode).toBe(403);
+
+    const failedInsert = await pool.query(
+      "INSERT INTO jobs(type, payload_json, status, retry_count, last_error) VALUES('asset_postprocess', '{}', 'failed', 3, 'forced failure') RETURNING id",
+    );
+    const failedId = failedInsert.rows[0].id as string;
+    const queuedInsert = await pool.query(
+      "INSERT INTO jobs(type, payload_json, status, retry_count) VALUES('asset_postprocess', '{}', 'queued', 0) RETURNING id",
+    );
+    const queuedId = queuedInsert.rows[0].id as string;
+
+    const list = await app.inject({ method: "GET", url: "/api/admin/jobs", headers: { authorization: `Bearer ${adminToken}` } });
+    expect(list.statusCode).toBe(200);
+    const items = list.json().items as Array<{ id: string; status: string }>;
+    expect(items.some((j) => j.id === failedId)).toBe(true);
+    expect(items.some((j) => j.id === queuedId)).toBe(true);
+
+    const retryOk = await app.inject({ method: "POST", url: `/api/admin/jobs/${failedId}/retry`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("jobs-retry-ok") } });
+    expect(retryOk.statusCode).toBe(200);
+    expect(retryOk.json().status).toBe("queued");
+    const reloadedFailed = await pool.query("SELECT status FROM jobs WHERE id = $1", [failedId]);
+    expect(reloadedFailed.rows[0].status).toBe("queued");
+
+    const retryConflict = await app.inject({ method: "POST", url: `/api/admin/jobs/${queuedId}/retry`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("jobs-retry-cf") } });
+    expect(retryConflict.statusCode).toBe(409);
+    expect(retryConflict.json().code).toBe("JOB_NOT_RETRIABLE");
+
+    const retry404 = await app.inject({ method: "POST", url: "/api/admin/jobs/00000000-0000-0000-0000-000000000000/retry", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("jobs-retry-404") } });
+    expect(retry404.statusCode).toBe(404);
+    expect(retry404.json().code).toBe("JOB_NOT_FOUND");
+  });
+
+  test("POST /api/admin/orders/:id/force-complete marks order completed and records audit", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("fc-l") }, payload: { title: "Force complete", description: "desc", priceCents: 900, quantity: 2 } });
+    const listingId = listing.json().id as string;
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'ready', '/tmp/fake')",
+      [listingId, sellerId, "fc.jpg"],
+    );
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("fc-p") } });
+    const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("fc-o") }, payload: { listingId, quantity: 1 } });
+    const orderId = order.json().id as string;
+    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("fc-pay") }, payload: { orderId, tenderType: "cash", amountCents: 900, transactionKey: "tx-fc-1" } });
+
+    const sellerForbidden = await app.inject({ method: "POST", url: `/api/admin/orders/${orderId}/force-complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("fc-forb") }, payload: { reason: "nope" } });
+    expect(sellerForbidden.statusCode).toBe(403);
+
+    const forced = await app.inject({ method: "POST", url: `/api/admin/orders/${orderId}/force-complete`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("fc-ok") }, payload: { reason: "ops override for stuck order" } });
+    expect(forced.statusCode).toBe(200);
+    expect(forced.json().status).toBe("completed");
+    const row = await pool.query("SELECT status, completed_at FROM orders WHERE id = $1", [orderId]);
+    expect(row.rows[0].status).toBe("completed");
+    expect(row.rows[0].completed_at).not.toBeNull();
+  });
+
+  test("GET /api/admin/refunds returns full refund history across sellers for admin", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ar-l") }, payload: { title: "Admin refund list", description: "desc", priceCents: 500, quantity: 2 } });
+    const listingId = listing.json().id as string;
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'ready', '/tmp/fake')",
+      [listingId, sellerId, "ar.jpg"],
+    );
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ar-p") } });
+    const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("ar-o") }, payload: { listingId, quantity: 1 } });
+    const orderId = order.json().id as string;
+    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ar-pay") }, payload: { orderId, tenderType: "cash", amountCents: 500, transactionKey: "tx-ar-1" } });
+    await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ar-comp") }, payload: { note: "done" } });
+    const refund = await app.inject({ method: "POST", url: "/api/refunds", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("ar-ref") }, payload: { orderId, amountCents: 500, reason: "Return" } });
+    const refundId = refund.json().id as string;
+
+    const list = await app.inject({ method: "GET", url: "/api/admin/refunds", headers: { authorization: `Bearer ${adminToken}` } });
+    expect(list.statusCode).toBe(200);
+    const items = list.json().items as Array<{ id: string }>;
+    expect(Array.isArray(items)).toBe(true);
+    expect(items.some((r) => r.id === refundId)).toBe(true);
+
+    const sellerForbidden = await app.inject({ method: "GET", url: "/api/admin/refunds", headers: { authorization: `Bearer ${sellerToken}` } });
+    expect(sellerForbidden.statusCode).toBe(403);
+  });
+
+  test("POST /api/admin/users creates a user with requested roles for admin only", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const email = `newuser-${Date.now()}@test.local`;
+
+    const forbidden = await app.inject({ method: "POST", url: "/api/admin/users", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("cu-forb") }, payload: { email, password: "Passw0rd!", displayName: "New", roles: ["seller"] } });
+    expect(forbidden.statusCode).toBe(403);
+
+    const created = await app.inject({ method: "POST", url: "/api/admin/users", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("cu-ok") }, payload: { email, password: "Passw0rd!", displayName: "New User", roles: ["seller", "buyer"] } });
+    expect(created.statusCode).toBe(201);
+    const body = created.json();
+    expect(body.id).toBeDefined();
+    expect(body.email).toBe(email);
+    expect(body.roles.sort()).toEqual(["buyer", "seller"]);
+
+    const dup = await app.inject({ method: "POST", url: "/api/admin/users", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("cu-dup") }, payload: { email, password: "Passw0rd!", displayName: "Dup", roles: ["seller"] } });
+    expect(dup.statusCode).toBe(409);
+  });
+
+  test("PATCH /api/admin/users/:id/status toggles active/inactive and 403 for seller", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const targetEmail = `status-target-${Date.now()}@test.local`;
+    const created = await app.inject({ method: "POST", url: "/api/admin/users", headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("us-create") }, payload: { email: targetEmail, password: "Passw0rd!", displayName: "Status Target", roles: ["seller"] } });
+    const targetId = created.json().id as string;
+
+    const forbidden = await app.inject({ method: "PATCH", url: `/api/admin/users/${targetId}/status`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("us-forb") }, payload: { status: "inactive", reason: "testing" } });
+    expect(forbidden.statusCode).toBe(403);
+
+    const deactivate = await app.inject({ method: "PATCH", url: `/api/admin/users/${targetId}/status`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("us-deact") }, payload: { status: "inactive", reason: "audit hold" } });
+    expect(deactivate.statusCode).toBe(200);
+    const row = await pool.query("SELECT status FROM users WHERE id = $1", [targetId]);
+    expect(row.rows[0].status).toBe("inactive");
+
+    const reactivate = await app.inject({ method: "PATCH", url: `/api/admin/users/${targetId}/status`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("us-reac") }, payload: { status: "active", reason: "cleared" } });
+    expect(reactivate.statusCode).toBe(200);
+    const row2 = await pool.query("SELECT status FROM users WHERE id = $1", [targetId]);
+    expect(row2.rows[0].status).toBe("active");
+  });
+
+  test("POST /api/refunds/:id/approve records admin decision and flips status", async () => {
+    const adminToken = await login("admin@localtrade.test", "admin");
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const buyerToken = await login("buyer@localtrade.test", "buyer");
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rap-l") }, payload: { title: "Refund approve", description: "desc", priceCents: 30000, quantity: 1 } });
+    const listingId = listing.json().id as string;
+    const sellerMe = await app.inject({ method: "GET", url: "/api/users/me", headers: { authorization: `Bearer ${sellerToken}` } });
+    const sellerId = sellerMe.json().id as string;
+    await pool.query(
+      "INSERT INTO assets(listing_id, seller_id, file_name, extension, mime_type, size_bytes, status, storage_path) VALUES($1, $2, $3, 'jpg', 'image/jpeg', 10, 'ready', '/tmp/fake')",
+      [listingId, sellerId, "rap.jpg"],
+    );
+    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rap-p") } });
+    const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("rap-o") }, payload: { listingId, quantity: 1 } });
+    const orderId = order.json().id as string;
+    await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rap-pay") }, payload: { orderId, tenderType: "cash", amountCents: 30000, transactionKey: "tx-rap-1" } });
+    await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rap-comp") }, payload: { note: "done" } });
+    const refund = await app.inject({ method: "POST", url: "/api/refunds", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rap-ref") }, payload: { orderId, amountCents: 30000, reason: "High value refund" } });
+    const refundId = refund.json().id as string;
+    expect(refund.json().requiresAdminApproval).toBe(true);
+
+    const sellerForbidden = await app.inject({ method: "POST", url: `/api/refunds/${refundId}/approve`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rap-forb") }, payload: { approve: true, note: "ok" } });
+    expect(sellerForbidden.statusCode).toBe(403);
+
+    const approved = await app.inject({ method: "POST", url: `/api/refunds/${refundId}/approve`, headers: { authorization: `Bearer ${adminToken}`, ...replayHeaders("rap-ok") }, payload: { approve: true, note: "approved after review" } });
+    expect(approved.statusCode).toBe(200);
+    const refundRow = await pool.query("SELECT status, approved_by FROM refunds WHERE id = $1", [refundId]);
+    expect(refundRow.rows[0].status).toBe("approved");
+    expect(refundRow.rows[0].approved_by).not.toBeNull();
+  });
+
+  test("GET /download/:assetId streams the asset body with correct Content-Type", async () => {
+    const sellerToken = await login("seller@localtrade.test", "seller");
+    const listing = await app.inject({ method: "POST", url: "/api/listings", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("dl-l") }, payload: { title: "Download stream", description: "desc", priceCents: 500, quantity: 1 } });
+    const listingId = listing.json().id as string;
+    const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("dl-s") }, payload: { listingId, fileName: "dl.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
+    const sid = session.json().sessionId as string;
+    const assetId = session.json().assetId as string;
+    const chunkBody = Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0x00]);
+    await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("dl-c"), "content-type": "application/octet-stream" }, payload: chunkBody });
+    await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("dl-f") }, payload: { detectedMime: "image/jpeg" } });
+    const signed = await app.inject({ method: "GET", url: `/api/media/assets/${assetId}/signed-url`, headers: { authorization: `Bearer ${sellerToken}` } });
+    expect(signed.statusCode).toBe(200);
+
+    const url = signed.json().url as string;
+    const downloaded = await app.inject({ method: "GET", url });
+    expect(downloaded.statusCode).toBe(200);
+    expect(downloaded.headers["content-type"]).toBe("image/jpeg");
+    expect(downloaded.rawPayload.length).toBeGreaterThan(0);
+  });
 });
