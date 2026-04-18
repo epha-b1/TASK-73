@@ -1,14 +1,22 @@
-FROM node:20-alpine AS build
+FROM node:20-bookworm-slim AS build
 WORKDIR /app
-# --legacy-peer-deps + retries guard against the npm "Exit handler never called"
-# regression we hit on some Alpine runtimes. No behavior change for package resolution.
+# Debian-slim base: avoids the Alpine-on-some-hosts npm "Exit handler never
+# called" intermittent failure we have observed during CI.
 COPY package.json package-lock.json ./
-RUN npm config set fetch-retries 5 \
- && npm config set fetch-retry-mintimeout 20000 \
- && npm config set fetch-retry-maxtimeout 120000 \
- && (npm ci --no-audit --no-fund --loglevel=error \
-     || npm ci --no-audit --no-fund --loglevel=error \
-     || npm install --no-audit --no-fund --loglevel=error)
+RUN set -eu; \
+    npm config set fetch-retries 5; \
+    npm config set fetch-retry-mintimeout 20000; \
+    npm config set fetch-retry-maxtimeout 120000; \
+    for i in 1 2 3; do \
+      rm -rf node_modules; \
+      npm ci --no-audit --no-fund --include=dev --loglevel=error || true; \
+      if [ -x node_modules/.bin/ng ]; then \
+        echo "npm ci succeeded (ng present on attempt $i)"; break; \
+      fi; \
+      echo "attempt $i did not install @angular/cli; retrying"; \
+      sleep 5; \
+    done; \
+    test -x node_modules/.bin/ng
 COPY . .
 RUN npm run build
 
