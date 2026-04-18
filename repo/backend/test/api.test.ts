@@ -114,6 +114,16 @@ async function login(email: string, password: string) {
   return response.json().accessToken as string;
 }
 
+async function waitForAssetReady(assetId: string, maxAttempts = 120) {
+  let status = "processing";
+  for (let i = 0; i < maxAttempts && status !== "ready"; i += 1) {
+    const row = await pool.query("SELECT status FROM assets WHERE id = $1", [assetId]);
+    status = String(row.rows[0]?.status ?? "processing");
+    if (status !== "ready") await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  return status;
+}
+
 describe("api integration with postgres", () => {
   beforeAll(async () => {
     // Real port-level listener (no app.inject bypass).
@@ -221,9 +231,12 @@ describe("api integration with postgres", () => {
       payload: { listingId, fileName: "label.png", sizeBytes: 10, extension: "png", mimeType: "image/png", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 },
     });
     const sessionId = sessionRes.json().sessionId as string;
+    const flowAssetId = sessionRes.json().assetId as string;
     await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sessionId}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("chunk3"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
     await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sessionId}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("finalize2") }, payload: { detectedMime: "image/png" } });
-    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("publish2") } });
+    expect(await waitForAssetReady(flowAssetId)).toBe("ready");
+    const publishFlow = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("publish2") } });
+    expect(publishFlow.statusCode).toBe(200);
 
     const orderRes = await app.inject({
       method: "POST",
@@ -1633,11 +1646,15 @@ describe("api integration with postgres", () => {
     const listingId = listing.json().id as string;
     const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rc-s") }, payload: { listingId, fileName: "x.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
     const sid = session.json().sessionId as string;
+    const rcAssetId = session.json().assetId as string;
     await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rc-c"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
     await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rc-f") }, payload: { detectedMime: "image/jpeg" } });
-    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rc-p") } });
+    expect(await waitForAssetReady(rcAssetId)).toBe("ready");
+    const publishRc = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rc-p") } });
+    expect(publishRc.statusCode).toBe(200);
 
     const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("rc-o") }, payload: { listingId, quantity: 1 } });
+    expect(order.statusCode).toBe(201);
     const orderId = order.json().id as string;
     await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rc-pay") }, payload: { orderId, tenderType: "cash", amountCents: 3000, transactionKey: "tx-rc-1" } });
 
@@ -1662,11 +1679,15 @@ describe("api integration with postgres", () => {
     const listingId = listing.json().id as string;
     const session = await app.inject({ method: "POST", url: "/api/media/upload-sessions", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-s") }, payload: { listingId, fileName: "x.jpg", sizeBytes: 10, extension: "jpg", mimeType: "image/jpeg", totalChunks: 1, chunkSizeBytes: 5 * 1024 * 1024 } });
     const sid = session.json().sessionId as string;
+    const rfcAssetId = session.json().assetId as string;
     await app.inject({ method: "PUT", url: `/api/media/upload-sessions/${sid}/chunks/0`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-c"), "content-type": "application/octet-stream" }, payload: Buffer.from("abc") });
     await app.inject({ method: "POST", url: `/api/media/upload-sessions/${sid}/finalize`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-f") }, payload: { detectedMime: "image/jpeg" } });
-    await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-p") } });
+    expect(await waitForAssetReady(rfcAssetId)).toBe("ready");
+    const publishRfc = await app.inject({ method: "POST", url: `/api/listings/${listingId}/publish`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-p") } });
+    expect(publishRfc.statusCode).toBe(200);
 
     const order = await app.inject({ method: "POST", url: "/api/orders", headers: { authorization: `Bearer ${buyerToken}`, ...replayHeaders("rfc-o") }, payload: { listingId, quantity: 1 } });
+    expect(order.statusCode).toBe(201);
     const orderId = order.json().id as string;
     await app.inject({ method: "POST", url: "/api/payments/capture", headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-pay") }, payload: { orderId, tenderType: "cash", amountCents: 3000, transactionKey: "tx-refund-chain-1" } });
     await app.inject({ method: "POST", url: `/api/orders/${orderId}/complete`, headers: { authorization: `Bearer ${sellerToken}`, ...replayHeaders("rfc-comp") }, payload: { note: "done" } });
