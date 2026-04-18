@@ -38,7 +38,12 @@ services:
       - media_data:/var/localtrade/media
       - chunk_data:/var/localtrade/chunks
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:3000/health/ready"]
+      # The api image is a minimal node base without wget/curl, so probe via node itself.
+      test:
+        - CMD
+        - node
+        - -e
+        - require('http').get('http://127.0.0.1:3000/health/ready', (r)=>process.exit(r.statusCode===200?0:1)).on('error', ()=>process.exit(1))
       interval: 5s
       timeout: 3s
       retries: 30
